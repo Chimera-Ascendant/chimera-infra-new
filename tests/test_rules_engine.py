@@ -36,3 +36,21 @@ def test_question_reps_left():
     resp = decide(req)
     assert "reps" in resp["response"]["text_to_speak"].lower()
     assert resp["log"]["triggered_action"]["priority"] == "HIGH"
+
+
+def test_form_microcue_range_low():
+    req = base_req(
+        motion_data=MotionData(
+            exercise_id="standing_march",
+            rep_count_total=3,
+            current_set_target_reps=10,
+            form_error_detected="range_too_low",
+            metrics=MotionMetrics(jitter_percent_increase=0.0, velocity_percent_decrease=0.0),
+            uncertainty_score=0.9,
+        ),
+        session_state=SessionState(time_since_last_cue_ms=8000),
+        user_utterance=UserUtterance(intent="silence", transcribed_text=""),
+    )
+    resp = decide(req)
+    assert resp["log"]["triggered_action"]["cue_template_id"] == "FORM_RANGE"
+    assert "range" in resp["response"]["text_to_speak"].lower()
