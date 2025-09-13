@@ -37,6 +37,7 @@ def decide(req: InferenceRequest):
 
     reps_remaining = max(req.motion_data.current_set_target_reps - req.motion_data.rep_count_total, 0)
     rc.append(f"Rule 1.8: reps_remaining={reps_remaining}")
+    time_since_last_cue_ms = getattr(req.session_state, "time_since_last_cue_ms", 0)
 
     # 4.2 Prioritization (subset)
     intent = (req.user_utterance.intent or "").lower()
@@ -87,10 +88,24 @@ def decide(req: InferenceRequest):
             rc.append("Rule 3.2.9: Ambiguous question.")
             action = {"action_type": "GENERATE_SPEECH", "priority": "HIGH", "cue_template_id": "AMBIGUOUS"}
     # 4.1 Form correction (proactive)
-    elif is_form_breakdown:
+    elif is_form_breakdown and time_since_last_cue_ms >= 7000:
         speak = "Let's pause a moment and reset your form. Focus on control."
         rc.append("Rule 4.1.1: Form correction cue.")
         action = {"action_type": "GENERATE_SPEECH", "priority": "HIGH", "cue_template_id": "FORM_CORRECTION"}
+    # 4.x Form-specific micro-cues (single detection, gentle)
+    elif (req.motion_data.form_error_detected in {"balance_unstable","range_too_low","jerk_high"}) and time_since_last_cue_ms >= 7000:
+        err = req.motion_data.form_error_detected
+        if err == "balance_unstable":
+            speak = "Plant your feet and steady your balance."
+            tmpl = "FORM_BALANCE"
+        elif err == "range_too_low":
+            speak = "Increase your range slightly—aim for a fuller motion."
+            tmpl = "FORM_RANGE"
+        else:  # jerk_high
+            speak = "Smooth it out—control the tempo on each rep."
+            tmpl = "FORM_JERK"
+        rc.append(f"Rule 4.x: Micro-cue for {err}.")
+        action = {"action_type": "GENERATE_SPEECH", "priority": "MEDIUM", "cue_template_id": tmpl}
     # 4.2 Fatigue-jitter cue
     elif is_high_fatigue and is_movement_shaky:
         speak = "I'm detecting some shakiness. Focus on controlling the movement."
