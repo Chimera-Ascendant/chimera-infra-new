@@ -10,6 +10,7 @@ def _digest(req: InferenceRequest):
         "jitter_increase": req.motion_data.metrics.jitter_percent_increase or 0.0,
         "velocity_drop": req.motion_data.metrics.velocity_percent_decrease or 0.0,
         "user_intent": req.user_utterance.intent or "silence",
+        "uncertainty": req.motion_data.uncertainty_score or 0.0,
     }
 
 
@@ -38,6 +39,10 @@ def decide(req: InferenceRequest):
     reps_remaining = max(req.motion_data.current_set_target_reps - req.motion_data.rep_count_total, 0)
     rc.append(f"Rule 1.8: reps_remaining={reps_remaining}")
     time_since_last_cue_ms = getattr(req.session_state, "time_since_last_cue_ms", 0)
+    velocity_drop = req.motion_data.metrics.velocity_percent_decrease or 0.0
+    uncertainty = req.motion_data.uncertainty_score or 0.0
+    if uncertainty >= 0.95:
+        rc.append("Rule 1.9: HIGH_UNCERTAINTY gating active")
 
     # 4.2 Prioritization (subset)
     intent = (req.user_utterance.intent or "").lower()
@@ -88,12 +93,12 @@ def decide(req: InferenceRequest):
             rc.append("Rule 3.2.9: Ambiguous question.")
             action = {"action_type": "GENERATE_SPEECH", "priority": "HIGH", "cue_template_id": "AMBIGUOUS"}
     # 4.1 Form correction (proactive)
-    elif is_form_breakdown and time_since_last_cue_ms >= 7000:
+    elif is_form_breakdown and time_since_last_cue_ms >= 7000 and uncertainty < 0.95:
         speak = "Let's pause a moment and reset your form. Focus on control."
         rc.append("Rule 4.1.1: Form correction cue.")
         action = {"action_type": "GENERATE_SPEECH", "priority": "HIGH", "cue_template_id": "FORM_CORRECTION"}
     # 4.x Form-specific micro-cues (single detection, gentle)
-    elif (req.motion_data.form_error_detected in {"balance_unstable","range_too_low","jerk_high"}) and time_since_last_cue_ms >= 7000:
+    elif (req.motion_data.form_error_detected in {"balance_unstable","range_too_low","jerk_high"}) and time_since_last_cue_ms >= 7000 and uncertainty < 0.95:
         err = req.motion_data.form_error_detected
         if err == "balance_unstable":
             speak = "Plant your feet and steady your balance."
@@ -107,10 +112,28 @@ def decide(req: InferenceRequest):
         rc.append(f"Rule 4.x: Micro-cue for {err}.")
         action = {"action_type": "GENERATE_SPEECH", "priority": "MEDIUM", "cue_template_id": tmpl}
     # 4.2 Fatigue-jitter cue
-    elif is_high_fatigue and is_movement_shaky:
+    elif is_high_fatigue and is_movement_shaky and uncertainty < 0.95:
         speak = "I'm detecting some shakiness. Focus on controlling the movement."
         rc.append("Rule 4.2.1: FATIGUE_JITTER cue.")
         action = {"action_type": "GENERATE_SPEECH", "priority": "MEDIUM", "cue_template_id": "FATIGUE_JITTER"}
+    # 4.3 Tempo cue – pick up pace if moving too slowly (velocity drop)
+    elif velocity_drop > 15.0 and time_since_last_cue_ms >= 8000 and uncertainty < 0.95:
+        speak = "Let's pick up the pace a little. Keep it controlled, but slightly faster."
+        rc.append("Rule 4.3.1: TEMPO_PICKUP cue.")
+        action = {"action_type": "GENERATE_SPEECH", "priority": "MEDIUM", "cue_template_id": "TEMPO_PICKUP"}
+    # 4.4 Milestones – encouragement near the end of a set
+    elif reps_remaining in {5, 3, 1} and time_since_last_cue_ms >= 9000 and uncertainty < 0.95:
+        if reps_remaining == 1:
+            speak = "Last rep—make it your best."
+            tmpl = "MILESTONE_LAST_REP"
+        elif reps_remaining == 3:
+            speak = "Three to go—nice and steady."
+            tmpl = "MILESTONE_THREE_LEFT"
+        else:  # 5
+            speak = "Five reps remaining—keep your rhythm."
+            tmpl = "MILESTONE_FIVE_LEFT"
+        rc.append("Rule 4.4.1: Milestone encouragement.")
+        action = {"action_type": "GENERATE_SPEECH", "priority": "LOW", "cue_template_id": tmpl}
     # 5.1 Cue budget (very simplified enforcement happens outside in app)
 
     log = {
